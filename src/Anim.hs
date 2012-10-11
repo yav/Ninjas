@@ -83,7 +83,7 @@ data World = World { background, tower, smoke :: Animation
 loadWorld :: IO World
 loadWorld =
   do npc <- loadNPC
-     tower <- loadAnim "tower"
+     tower <- loop `fmap` loadAnim "tower"
      smoke <- loadSmoke
      let background = once defaultFrameDelay []
      return World { .. }
