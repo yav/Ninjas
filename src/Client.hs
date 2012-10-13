@@ -54,7 +54,7 @@ defaultClientEnv = ClientEnv
 
 clientMain :: ClientEnv -> IO ()
 clientMain (ClientEnv host port name) =
-  withPortAudio 2 44100 $ \pa ->
+  withPortAudio Sound.audioChannels Sound.audioRate $ \pa ->
   do anim <- Anim.loadWorld
      soun <- Sound.loadWorld
      h <- connectTo host (PortNumber (fromIntegral port))
@@ -64,8 +64,8 @@ clientMain (ClientEnv host port name) =
 
      poss <- getInitialWorld h
      r <- newMVar (initClientWorld soun anim poss)
-     _ <- forkIO $ clientUpdates pa h r
-     runGame h r
+     _ <- forkIO $ clientUpdates h r
+     runGame pa h r
 
 serverWaitingMessage :: Int -> String
 serverWaitingMessage n
@@ -92,10 +92,11 @@ initClientWorld s anim poss =
         , smokeTimers   = []
         , appearance    = anim
         , sounds        = s
+        , worldNoise    = []
         }
 
-runGame :: Handle -> MVar World -> IO ()
-runGame h var =
+runGame :: PortAudio -> Handle -> MVar World -> IO ()
+runGame pa h var =
      playIO
        (InWindow "Ninjas"
          (round width + windowPadding, round height + windowPadding)
@@ -103,10 +104,24 @@ runGame h var =
        black
        eventsPerSecond
        () -- "state"
-       (\() -> fmap drawWorld (readMVar var))
+       (\() -> modifyMVar var $ \w ->
+                  do w1 <- playWorld pa w
+                     return (w1, drawWorld w1))
        (inputEvent h var)
        (\t () -> modifyMVar_ var $ \w -> return $ updateClientWorld t w)
   where (width,height) = subPt boardMax boardMin
+
+
+playWorld :: PortAudio -> World -> IO World
+playWorld pa w = do mapM_ (playSample pa) (worldNoise w)
+                    cs <- mapM playChar (worldCharacters w)
+                    return w { worldNoise = [], worldCharacters = cs }
+  where
+  playChar c = do mapM_ (playSample pa) (clientNoise c)
+                  unless (null (clientNoise c)) $
+                     print $ "client made: " ++ show (length (clientNoise c)) ++ " noises."
+                  return c { clientNoise = [] }
+
 
 drawWorld      :: World -> Picture
 drawWorld w     = pictures
@@ -182,63 +197,63 @@ clearMessages var = modifyMVar_ var $ \w -> return $ w { worldMessages = [] }
 
 updateClientWorld :: Float -> World -> World
 updateClientWorld d w =
-  w { worldCharacters = map (stepClientCharacter npcLooks d) (worldCharacters w)
+  w { worldCharacters = map (stepClientCharacter npcSnds npcLooks d) (worldCharacters w)
     , dingTimers  = [ t - d      |  t     <- dingTimers  w, t > d]
     , smokeTimers = [(pt, Anim.update d a) |
                             (pt,a) <- smokeTimers w, not (Anim.finished d a) ]
     , appearance  = Anim.updateWorld d (appearance w)
     }
   where npcLooks = Anim.npc (appearance w)
+        npcSnds  = Sound.npc (sounds w)
 
-stepClientCharacter :: Anim.NPC -> Float -> ClientCharacter -> ClientCharacter
-stepClientCharacter looks elapsed clientChar =
+stepClientCharacter :: Sound.NPC -> Anim.NPC -> Float -> ClientCharacter -> ClientCharacter
+stepClientCharacter snds looks elapsed clientChar =
   case stepCharacter elapsed (clientCharacter clientChar) of
     (char,changed,_)
-      | changed   -> newClientCharacter looks char
+      | changed   -> newClientCharacter snds looks char
       | otherwise -> clientChar { clientCharacter = char
                                 , clientAnim = Anim.update elapsed (clientAnim clientChar) }
 
-newClientCharacter :: Anim.NPC -> Character -> ClientCharacter
-newClientCharacter looks clientCharacter = ClientCharacter { .. }
+newClientCharacter :: Sound.NPC -> Anim.NPC -> Character -> ClientCharacter
+newClientCharacter snd looks clientCharacter = ClientCharacter { .. }
   where
-  clientAnim = case charState clientCharacter of
-                 Walking {}               -> Anim.walk looks
-                 Waiting w | waitStunned w -> Anim.stun   looks
-                           | otherwise    -> Anim.stay   looks
-                 Attacking {}             -> Anim.attack looks
-                 Dead                     -> Anim.die    looks
+  (clientAnim, clientNoise) =
+    case charState clientCharacter of
+      Walking {}                -> (Anim.walk   looks, [])
+      Waiting w | waitStunned w -> (Anim.stun   looks, [])
+                | otherwise     -> (Anim.stay   looks, [])
+      Attacking {}              -> (Anim.attack looks, [Sound.attack snd])
+      Dead                      -> (Anim.die    looks, [])
 
-clientUpdates :: PortAudio -> Handle -> MVar World -> IO ()
-clientUpdates pa h var = forever $
+clientUpdates :: Handle -> MVar World -> IO ()
+clientUpdates h var = forever $
   do c <- hGetServerCommand h
-     modifyMVar_ var $ \w -> processCmd w c
+     modifyMVar_ var $ \w -> return $! processCmd w c
 
   where
 
-  processCmd :: World -> ServerCommand -> IO World
+  processCmd :: World -> ServerCommand -> World
   processCmd w c =
     case c of
-      ServerReady       -> return $! w { worldMessages = [] }
-      ServerMessage txt -> return $! w { worldMessages = txt : worldMessages w }
-      ServerDing        ->
-        do playSample pa $ Sound.ding $ sounds w
-           return $! w { dingTimers = dingPeriod : dingTimers w }
+      ServerReady       -> w { worldMessages = [] }
+      ServerMessage txt -> w { worldMessages = txt : worldMessages w }
+      ServerDing        -> let ding = Sound.ding (sounds w)
+                           in w { dingTimers = dingPeriod : dingTimers w
+                                , worldNoise = ding : worldNoise w }
 
-      ServerSmoke pt    ->
-        let smoke = Anim.smoke (appearance w)
-        in return $! w { smokeTimers = (pt,smoke): smokeTimers w }
+      ServerSmoke pt    -> let smoke = Anim.smoke (appearance w)
+                           in w { smokeTimers = (pt,smoke) : smokeTimers w }
 
-      SetWorld poss     -> return $! initClientWorld (sounds w)
-                                                     (appearance w) poss
+      SetWorld poss     -> initClientWorld (sounds w) (appearance w) poss
 
-      ServerCommand i m ->
-        do cs <- updateNpcList i (npcCommand w m) (worldCharacters w)
-           return $! w { worldCharacters = cs }
-      _                 -> return w
+      ServerCommand i m -> w { worldCharacters = updateNpcList i
+                                                    (npcCommand w m)
+                                                    (worldCharacters w) }
+      _                 -> w
 
   npcCommand w cmd cnpc =
     let npc = clientCharacter cnpc
-    in return $ newClientCharacter (Anim.npc $ appearance w) $
+    in newClientCharacter (Sound.npc (sounds w)) (Anim.npc $ appearance w) $
        case cmd of
          Move from to   -> walkingCharacter to npc { charPos = from }
          Stop           -> waitingCharacter Nothing False npc
@@ -246,12 +261,12 @@ clientUpdates pa h var = forever $
          Die            -> deadCharacter npc
          Attack         -> attackingCharacter npc
 
-updateNpcList :: Int -> (ClientCharacter -> IO ClientCharacter)
-                     -> [ClientCharacter] -> IO [ClientCharacter]
-updateNpcList _ _ [] = return []
+updateNpcList :: Int -> (ClientCharacter -> ClientCharacter)
+                     -> [ClientCharacter] -> [ClientCharacter]
+updateNpcList _ _ [] = []
 updateNpcList i f (n:ns)
-  | charName (clientCharacter n) == i = fmap (:ns) (f n)
-  | otherwise      = fmap (n :) (updateNpcList i f ns)
+  | charName (clientCharacter n) == i = f n : ns
+  | otherwise      = n : (updateNpcList i f ns)
 
 data World = World
   { worldCharacters  :: [ClientCharacter]
@@ -260,7 +275,9 @@ data World = World
   , worldMessages    :: [String]
   , appearance       :: Anim.World
   , sounds           :: Sound.World
+  , worldNoise       :: [Sample]
   }
+
 
 -- | Construct a new character given a name, a position,
 -- and a facing unit vector. This function is used
@@ -270,11 +287,13 @@ initClientCharacter :: Anim.NPC -> Int -> Point -> Vector -> ClientCharacter
 initClientCharacter anim charName charPos charFacing =
   let charState = Waiting Wait { waitWaiting = Nothing, waitStunned = False }
       clientAnim = Anim.stay anim
+      clientNoise = []
       clientCharacter = Character { .. }
   in  ClientCharacter { .. }
 
 data ClientCharacter = ClientCharacter
   { clientCharacter  :: Character
   , clientAnim       :: Anim.Animation
+  , clientNoise      :: [Sample]
   }
 

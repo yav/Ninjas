@@ -35,5 +35,5 @@ executable Ninjas
                        random,
                        filepath,
                        networked-game,
-                       port-audio-play
+                       port-audio-play >= 0.1.0.1
   ghc-options:         -Wall
