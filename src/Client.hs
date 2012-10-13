@@ -6,6 +6,7 @@ import Control.Monad
 import Graphics.Gloss.Interface.IO.Game
 import Graphics.Gloss.Data.Vector
 import Graphics.Gloss.Geometry.Angle
+import Sound.Play
 import System.IO
 import Network
 import Server (ServerEnv(..), defaultServerEnv)
@@ -15,6 +16,7 @@ import Character
 import Parameters
 import VectorUtils
 import qualified Anim
+import qualified Sound
 
 moveButton, stopButton, attackButton, smokeButton,
   newGameButton, clearButton :: Key
@@ -52,15 +54,17 @@ defaultClientEnv = ClientEnv
 
 clientMain :: ClientEnv -> IO ()
 clientMain (ClientEnv host port name) =
+  withPortAudio 2 44100 $ \pa ->
   do anim <- Anim.loadWorld
+     soun <- Sound.loadWorld
      h <- connectTo host (PortNumber (fromIntegral port))
      hSetBuffering h NoBuffering
 
      hPutClientCommand h (ClientJoin name)
 
      poss <- getInitialWorld h
-     r <- newMVar (initClientWorld anim poss)
-     _ <- forkIO $ clientUpdates h r
+     r <- newMVar (initClientWorld soun anim poss)
+     _ <- forkIO $ clientUpdates pa h r
      runGame h r
 
 serverWaitingMessage :: Int -> String
@@ -79,14 +83,15 @@ getInitialWorld h =
             getInitialWorld h
        _ -> fail "Unexpected initial message"
 
-initClientWorld :: Anim.World -> [(Int, Point, Vector)] -> World
-initClientWorld anim poss =
+initClientWorld :: Sound.World -> Anim.World -> [(Int, Point, Vector)] -> World
+initClientWorld s anim poss =
   World { worldCharacters = [initClientCharacter (Anim.npc anim) i p v
                                 | (i,p,v) <- poss ]
         , dingTimers    = []
         , worldMessages = []
         , smokeTimers   = []
         , appearance    = anim
+        , sounds        = s
         }
 
 runGame :: Handle -> MVar World -> IO ()
@@ -203,28 +208,37 @@ newClientCharacter looks clientCharacter = ClientCharacter { .. }
                  Attacking {}             -> Anim.attack looks
                  Dead                     -> Anim.die    looks
 
-clientUpdates :: Handle -> MVar World -> IO ()
-clientUpdates h var = forever $
+clientUpdates :: PortAudio -> Handle -> MVar World -> IO ()
+clientUpdates pa h var = forever $
   do c <- hGetServerCommand h
-     modifyMVar_ var $ \w -> return $! processCmd w c
+     modifyMVar_ var $ \w -> processCmd w c
 
   where
 
+  processCmd :: World -> ServerCommand -> IO World
   processCmd w c =
     case c of
-      ServerReady       -> w { worldMessages = [] }
-      ServerMessage txt -> w { worldMessages = txt : worldMessages w }
-      ServerDing        -> w { dingTimers = dingPeriod : dingTimers w }
-      ServerSmoke pt    -> let smoke = Anim.smoke (appearance w)
-                           in w { smokeTimers = (pt,smoke) : smokeTimers w }
-      SetWorld poss     -> initClientWorld (appearance w) poss
-      ServerCommand i m -> let f = npcCommand w m
-                           in w { worldCharacters = updateNpcList i f $ worldCharacters w }
-      _                 -> w
+      ServerReady       -> return $! w { worldMessages = [] }
+      ServerMessage txt -> return $! w { worldMessages = txt : worldMessages w }
+      ServerDing        ->
+        do playSample pa $ Sound.ding $ sounds w
+           return $! w { dingTimers = dingPeriod : dingTimers w }
+
+      ServerSmoke pt    ->
+        let smoke = Anim.smoke (appearance w)
+        in return $! w { smokeTimers = (pt,smoke): smokeTimers w }
+
+      SetWorld poss     -> return $! initClientWorld (sounds w)
+                                                     (appearance w) poss
+
+      ServerCommand i m ->
+        do cs <- updateNpcList i (npcCommand w m) (worldCharacters w)
+           return $! w { worldCharacters = cs }
+      _                 -> return w
 
   npcCommand w cmd cnpc =
     let npc = clientCharacter cnpc
-    in newClientCharacter (Anim.npc $ appearance w) $
+    in return $ newClientCharacter (Anim.npc $ appearance w) $
        case cmd of
          Move from to   -> walkingCharacter to npc { charPos = from }
          Stop           -> waitingCharacter Nothing False npc
@@ -232,11 +246,12 @@ clientUpdates h var = forever $
          Die            -> deadCharacter npc
          Attack         -> attackingCharacter npc
 
-updateNpcList :: Int -> (ClientCharacter -> ClientCharacter) -> [ClientCharacter] -> [ClientCharacter]
-updateNpcList _ _ [] = []
+updateNpcList :: Int -> (ClientCharacter -> IO ClientCharacter)
+                     -> [ClientCharacter] -> IO [ClientCharacter]
+updateNpcList _ _ [] = return []
 updateNpcList i f (n:ns)
-  | charName (clientCharacter n) == i = f n : ns
-  | otherwise      = n : updateNpcList i f ns
+  | charName (clientCharacter n) == i = fmap (:ns) (f n)
+  | otherwise      = fmap (n :) (updateNpcList i f ns)
 
 data World = World
   { worldCharacters  :: [ClientCharacter]
@@ -244,6 +259,7 @@ data World = World
   , smokeTimers      :: [(Point, Anim.Animation)]
   , worldMessages    :: [String]
   , appearance       :: Anim.World
+  , sounds           :: Sound.World
   }
 
 -- | Construct a new character given a name, a position,

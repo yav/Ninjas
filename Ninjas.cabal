@@ -13,7 +13,7 @@ category:            Game
 build-type:          Simple
 cabal-version:       >=1.8
 
-data-files: images/*.bmp
+data-files: images/*.bmp, sounds/*.ogg
 
 executable Ninjas
   main-is:             Main.hs
@@ -24,7 +24,8 @@ executable Ninjas
                        NetworkMessages,
                        Parameters,
                        Server,
-                       Simulation
+                       Simulation,
+                       Sound
   hs-source-dirs:      src
   build-depends:       base,
                        binary,
@@ -33,5 +34,6 @@ executable Ninjas
                        network,
                        random,
                        filepath,
-                       networked-game
+                       networked-game,
+                       port-audio-play
   ghc-options:         -Wall
