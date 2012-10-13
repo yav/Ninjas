@@ -37,6 +37,10 @@ textScale = 0.25
 dingPosition :: Point
 dingPosition = (fst boardMin + 5, snd boardMax - 20)
 
+targetRadius :: Float
+targetRadius = 80
+
+
 data ClientEnv = ClientEnv
   { hostname   :: HostName
   , clientPort :: Int
@@ -87,6 +91,7 @@ initClientWorld anim poss =
         , worldMessages = []
         , smokeTimers   = []
         , appearance    = anim
+        , mousePtr      = (0,0)
         }
 
 runGame :: Handle -> MVar World -> IO ()
@@ -111,6 +116,19 @@ drawWorld w     = pictures
                ++ map drawCharacter (worldCharacters w)
                ++ map drawSmoke (smokeTimers w)
                ++ messagePictures (worldMessages w)
+               ++ [ translateV (mousePtr w) target ]
+  where
+  thickness = (magV (subPt (addPt pt boardMax) boardMin) - targetRadius)
+  pt        = let wp = 2 * ninjaRadius
+              in (wp,wp)
+
+  target    = pictures
+              [ color (makeColor 0 0 0 0.8)
+                $ thickCircle (targetRadius + thickness / 2) thickness
+              , color white $ circle (0.75 * targetRadius)
+              , color red   $ circleSolid (0.1 * targetRadius)
+              ]
+
 
 drawSmoke :: (Point, Anim.Animation) -> Picture
 drawSmoke (pt,a) = translateV pt (Anim.curFrame a)
@@ -163,6 +181,8 @@ translateV :: Vector -> Picture -> Picture
 translateV (x,y) = translate x y
 
 inputEvent     :: Handle -> MVar World -> Event -> () -> IO ()
+inputEvent _ var (EventMotion p) _ =
+  hPutClientCommand h (ClientCommand (Move (0,0) p))
 inputEvent h var (EventKey k Down _ pos) ()
   | k == moveButton   = hPutClientCommand h (ClientCommand (Move (0,0) pos))
   | k == stopButton   = hPutClientCommand h (ClientCommand Stop      )
@@ -244,6 +264,7 @@ data World = World
   , smokeTimers      :: [(Point, Anim.Animation)]
   , worldMessages    :: [String]
   , appearance       :: Anim.World
+  , mousePtr         :: Point
   }
 
 -- | Construct a new character given a name, a position,

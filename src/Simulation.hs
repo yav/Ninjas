@@ -22,14 +22,17 @@ data Player   = Player
   deriving (Show, Read, Eq)
 
 data ServerWorld = ServerWorld
-  { serverNpcs    :: [Character]
-  , serverPlayers :: [Player]
-  , serverMode    :: ServerMode
-  , serverLobby   :: [(Int,String)]
+  { serverNpcs      :: [Character]
+  , serverPlayers   :: [Player]
+  , serverShooters  :: [Shooter]
+  , serverMode      :: ServerMode
+  , serverLobby     :: [(Int,String)]
   }
 
 data ServerMode = Playing | Starting Float | Stopped
   deriving (Eq, Read, Show)
+
+data Shooter    = Shooter { kills :: Int, shots :: Int }
 
 -- | Lift a function on Characters to one on Players
 mapPlayerCharacter :: (Character -> Character) -> Player -> Player
